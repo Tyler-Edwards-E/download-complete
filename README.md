@@ -1,5 +1,5 @@
-# RAGING DOWNLOAD
-## Applying data science to fighting games.
+# DOWNLOAD COMPLETE
+## Creating and analyzing data from fighting game matches.
 **Each action a player performs in a match is recorded into a dataset which can be analyzed to find trends in their play.**
 
 _**Objectives**_
@@ -10,7 +10,7 @@ _**Objectives**_
 [![Ken Sprite Detection Prototype](https://user-images.githubusercontent.com/69095276/114774111-d5c5ad80-9d3d-11eb-97ee-01d5c9442c17.png)](https://medium.com/@TyEdwardz/raging-download-a3ff6fcc42cb "CLICK FOR FULL ARTICLE")
 
 
-## Daigo vs. Tokido Demo (SFV)
+## PROTOTYPE (SFV)
 Proof of concept that uses manually collected data from a video to analyze a match and prove how useful this data can be in fighting games.
 
 ![Normals Comparison](https://user-images.githubusercontent.com/69095276/114776325-58e80300-9d40-11eb-9f6c-7d477ebcc63b.png)
