@@ -1,5 +1,5 @@
-# 00 - Proof of Concept
-## Using manually collected data to explore its potential applications.
+# 00 - Prototype
+## Using manually collected data to test concept and explore potential applications.
 
 ### [_**More details in the article.**_](https://medium.com/@TyEdwardz/raging-download-a3ff6fcc42cb)
 
