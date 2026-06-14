@@ -1,0 +1,86 @@
+# sf3_context.yaml
+
+
+KEN:
+  # Overwrite 5MK startup if it flows into a Tatsu loop
+  [5MK, Tatsu_Loop]: Tatsu_Startup
+  [5MK, Hadouken_Loop]: Hadou_Startup
+
+DUDLEY:
+    # 5HP~6HP and backswing startup
+    [5HP~6HP~63214K, 5HP~6HP]: 5HP~6HP
+    [63214K, 5HP~6HP~63214K, 6MK, 2HP, 5HP]: 63214KK
+    [63214K, 5HP~6HP~63214K, 6MK, 2HP]: 63214KK
+    [63214K, 5HP~6HP~63214K, 6MK]: 63214K
+    [5HP~6HP~63214K, 5HP~6HP]: 5HP~6HP
+    [5HP~6HP~63214K, 5HP~6HP]: 5HP~6HP
+    # Ducking leads into forward dash and follow-ups are normals
+    [41236K, dash-forward, 5HP~6HP]: 41236K-(P)
+    [41236K, dash-forward, 2HP]: 41236K-(K)
+    [41236K, dash-forward]: 41236K
+    # Quickrise leads into slow rise animation
+    [rise-quick, rise-slow]: rise-quick
+    # Hit-air goes into quickrise and jumping animation
+    [hit-air, rise-quick, jumping]: hit-air
+    [hit-air, rise-quick]: hit-air
+    # Machine gun blow ends with a bunch of normals
+    [41236P, 5HK, 2HP]: 41236PP
+    [41236P, 5HK]: 41236P
+    # Jump and dash startup animation are the same
+    [dash~jump, jumping]: jumping
+    [dash~jump, dash-forward]: dash-forward
+    # 2LP and 2LK startup and recovery are the same
+    [2LP~2LK, 2LP, 2LP~2LK]: 2LP
+    [2LP~2LK, 2LP]: 2LP
+    [2LP, 2LP~2LK]: 2LP
+    [2LP~2LK, 2LK, 2LP~2LK]: 2LK
+    [2LP~2LK, 2LK]: 2LK
+    [2LK, 2LP~2LK]: 2LK
+    # Win animation with coat is a bunch of normals. Will never be interrupted so no need to add more than one sequence
+    [5LP, 5MP, 5MK, 5LK, win]: win
+    # Hit shock into hit standing
+    [hit-shock, hit-standing]: rise-quick
+    #VFX
+    #  # Check for his car object during his intro sequence
+    #  Jump_Forward:
+    #    requires_vfx: "Dudley_Car"
+    #    resolved_action: "Intro"
+    #taunt vs win?
+
+URIEN:
+    # 5MK startup and recovery is the same as 5LK
+    [5LK, 5MK]: 5MK
+    [5LK, 5MK, 5LK]: 5MK
+    [5MK, 5LK]: 5MK
+    # Fireball angles
+    [236P, 236LP, 236P]: 236LP
+    [236P, 236LP]: 236LP
+    [236LP, 236P]: 236LP
+    [236P, 236MP, 236P]: 236MP
+    [236P, 236MP]: 236LP
+    [236MP, 236P]: 236LP
+    [236P, 236HP, 236P]: 236HP
+    [236P, 236HP]: 236HP
+    [236HP, 236P]: 236HP
+    # Headbutt recovers with jump animation
+    [(2)8P, jump]: (2)8P
+    # Forward/Backward throw recovers with rise-slow animation
+    [throw-forward~backward, rise-slow]: throw-forward~backward
+    # Kneedrop recovers with jump animation
+    [(2)8K~hit-air, (2)8K), jump]: (2)8K)
+    [(2)8K~hit-air, (2)8K)]: (2)8K)
+    [(2)8K), jump]: (2)8K)
+    # Hit air leads into kneedrop flip and jump animation
+    [hit-air, (2)8K~hit-air, jump]: hit-air
+    [hit-standing, (2)8K~hit-air, jump]: hit-air
+    [hit-air, (2)8K~hit-air]: hit-air
+    [hit-standing, (2)8K~hit-air]: hit-air
+    [(2)8K~hit-air, jump]: hit-air
+    # Quickrise leads into slow rise animation
+    [rise-quick, rise-slow]: rise-quick
+    # Hit shock into hit standing
+    [hit-shock, hit-standing]: rise-quick
+    ########## VFX?
+
+
+

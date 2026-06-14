@@ -1,41 +1,87 @@
+"""
+dc_aggregate.py
+Tyler Edwards
+Contains functions that translate YOLO Download Complete text outputs into a functional dataset
+"""
 
 import os
+import time
+import math
+import yaml
+import logging
+import datetime
 import pandas as pd
 import numpy as np
-import datetime
-import math
+from tqdm import tqdm
 
-# ------------------------------------------ ROSTER FRAMES MERGING ---------------------------------------------------------------
-def roster_frames(filepath, keypath):
-    _, _, files = next(os.walk(filepath))
-    file_count = len(files)
+# ------------------------------------------ UTILITY -------------------------------------------------------------------
+
+def get_file_logger(name, log_filename, level=logging.INFO):
+    """
+    Returns a logger that writes exclusively to log_filename
+    """
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(level)
+    logger.propagate = False
+
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler = logging.FileHandler(log_filename, mode='w')
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    return logger
+
+
+def timestamp(message):
+    """
+    Simple function to print out timestamp messages throughout run
+    """
+    ts = time.time()
+    print(datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %I:%M:%S %p'), "||",message)
+
+
+def frame_to_ts(frame):
+    """
+    Converts the raw frame of video integer to a more readable timestamp
+    """
+    total_seconds = frame / 60
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}"
+
+
+# ------------------------------------------ READ & MERGE YOLO TEXT FILES ---------------------------------------------
+
+def roster_frames(filepath, model_classes, chars, shoto=False,debug=False):  # (filepath to ROSTER detection output folder, roster_m classes)
+    """
+    Converts the frame by frame text file output from the YOLO ROSTER detection model into a dataframe
+    """
+    logger = get_file_logger("roster_frames", "logs/roster_frames.log", level=logging.DEBUG)
+    logger.info(f"Extracting frame detections from {filepath}")
+
+    _, _, files = next(os.walk(filepath)) # Get list of all file names in path
+    file_count = len(files)  # Used for debug printouts
 
     # Initializing columns
-    df = pd.DataFrame(columns = ["video", "frame", "time", "character", "x", "y", "w", "h", "area", "confidence"])
+    df = pd.DataFrame(columns = ["video", "frame", "time", "character", "x_center", "y_center", "width", "height", "area", "confidence"])
 
-    # Creating dictionary for move/sprite list since they're encoded in the text file output
-    with open(keypath, encoding="utf8") as f:
-        lines = f.readlines()
-        i_list = list(range(0,len(lines)))
-        lines2 = []
-        for i in lines:
-            lines2.append(i.strip())
-        keys = dict(zip(i_list, lines2))
-
-    progress = 1
-    # Parsing over YOLO text file output and creating rows of data
-    for file in os.listdir(filepath):
-        with open(str(filepath + "/" + file)) as f:
+    progress = 1  # Used for progress bar
+    # Parsing over YOLO texts and converting them to rows of data
+    for file in tqdm(os.listdir(filepath), desc="Converting ROSTER detection .txt files into dataframe", unit="file"):
+        with open(str(filepath + "/" + file), encoding = 'utf-8') as f:
             lines = f.readlines()  # Rows in text file
         # Splitting filename string to grab the frame # of video
         filesplit = file.split("_")
         # Video name is going to be all the text in the label filenames except the frame number at the end
         i = 1
         video = filesplit[0]
-        while i < len(filesplit):
+        while i < len(filesplit) - 1:
             video = video + "_" + filesplit[i]
             i = i + 1
-        # Will always be the last value in the list regardless of the video name
+        # Frame num will always be the last value in the list regardless of the video name
         frame = int(filesplit[-1].replace(".txt", "")) - 1
 
         # Turning the lines inside the text file into a list
@@ -44,7 +90,7 @@ def roster_frames(filepath, keypath):
             cls = detection[0]
 
             # Class / character move or action
-            char = str(keys[int(cls)])
+            char = str(model_classes[int(cls)])
 
             x = float(detection[1])
             y = float(detection[2])
@@ -53,42 +99,83 @@ def roster_frames(filepath, keypath):
             area = w*h
             conf = float(detection[5])
 
-            # Debug printouts
-            # print(str(progress) + "/" + str(file_count)) # Can't use frame for progress counter since they're not actually in order in the folder
-            # print("VIDEO:", video)
-            # print("FRAME:", frame)
-            #
-            # print("CHARACTER:", char)
-            # print("CHAR_POSITION:", x,y,w,h)
-            # print("CONFIDENCE:", conf)
-            # print("--------------------------------------------------------------------")
+            if debug:
+                logger.debug("--------------------------------------------------------------------")
+                logger.debug(f"{progress}/{file_count}") # Can't use frame for progress counter since they're not actually in order in the folder
+                logger.debug(filesplit)
+                logger.debug(f"VIDEO: {video}")
+                logger.debug(f"FRAME: {frame}")
+                logger.debug(f"CHARACTER: {char}")
+                logger.debug(f"CHAR_POSITION: {x},{y},{w},{h}")
+                logger.debug(f"CONFIDENCE: {conf}")
 
-            row = [str(video),int(frame),round(frame/60,2),char,x,y,w,h,area,conf]
+            row = [str(video),int(frame),frame_to_ts(frame),char,x,y,w,h,area,conf]
             df.loc[len(df)] = row
-        progress = progress + 1
-    return df
+        progress = progress + 1  # Used for debug printouts
 
-# ------------------------------------------ FRAME MERGING ---------------------------------------------------------------
-# Create dataframe of frame by frame sprites on screen. (Raw output of .txt files into one dataframe)
-def character_frames(filepath, keypath):
+
+    # Replace shoto detections with the one shoto we want if necessary
+    shotos_selected = list(set(chars).intersection(['AKUMA', 'KEN', 'RYU', 'SEAN']))
+    if len(shotos_selected) > 1:  # Shoto mirror
+        print("Shoto mirror, detection might not be great")
+    elif len(shotos_selected) == 1:  # Only one of characters in match is a shoto
+        # Replace all shoto detections with the one we want
+        df.loc[df['character'].isin(['AKUMA', 'KEN', 'RYU', 'SEAN']), 'character'] = shotos_selected[0]
+
+    # Merge multiple detections to one
+    # Convert center/dimensions to bounding box corners
+    df['x_min'] = df['x_center'] - (df['width'] / 2)
+    df['y_min'] = df['y_center'] - (df['height'] / 2)
+    df['x_max'] = df['x_center'] + (df['width'] / 2)
+    df['y_max'] = df['y_center'] + (df['height'] / 2)
+
+    # Group and aggregate the "highest" values
+    merged = df.groupby(['video', 'frame', 'character']).agg({
+        'time': 'first',
+        'x_min': 'min',  # True absolute top-left X
+        'y_min': 'min',  # True absolute top-left Y
+        'x_max': 'max',  # True absolute bottom-right X
+        'y_max': 'max',  # True absolute bottom-right Y
+        'confidence': 'max'  # Keep the highest confidence rating among the duplicates
+    }).reset_index()
+
+    # Recalculate original YOLO format and area
+    merged['width'] = merged['x_max'] - merged['x_min']
+    merged['height'] = merged['y_max'] - merged['y_min']
+    merged['x_center'] = merged['x_min'] + (merged['width'] / 2)
+    merged['y_center'] = merged['y_min'] + (merged['height'] / 2)
+    merged['area'] = merged['width'] * merged['height']
+    # Format back to original column order
+    final_columns = ["video", "frame", "time", "character", "x_center", "y_center", "width", "height", "area","confidence"]
+    df_cleaned = merged[final_columns]
+    return df_cleaned
+
+
+def character_frames(filepath, model_classes, vfx=False, debug=False):  # (filepath to CHARACTER detection output folder, character model)
+    """
+    Converts the frame by frame text file output from the YOLO CHARACTER detection model into a dataframe
+    (Effectively the same as the roster function with slight variances. Is also used for VFX detections)
+    """
+
+    # Find name of character we're looking at
+    if vfx == True:
+        character = 'VFX'
+    else:
+        character = model_classes[0].split("-")[0]
+
+    logger = get_file_logger(f"{character}_frames", f"logs/{character}_frames.log", level=logging.DEBUG)
+    if debug:
+        logger.info(f"Extracting frame detections from {filepath}")
+
     _, _, files = next(os.walk(filepath))
     file_count = len(files)
 
     # Initializing columns
-    df = pd.DataFrame(columns = ["video", "frame", "time", "character", "action", "description", "x", "y", "w", "h", "area", "confidence"])
-
-    # Creating dictionary for move/sprite list since they're encoded in the text file output
-    with open(keypath, encoding='utf-8') as f:
-        lines = f.readlines()
-        i_list = list(range(0,len(lines)))
-        lines2 = []
-        for i in lines:
-            lines2.append(i.strip())
-        keys = dict(zip(i_list, lines2))
+    df = pd.DataFrame(columns = ["video", "frame", "time", "character", "action", "description", "x_center", "y_center", "width", "height", "area", "confidence"])
 
     progress = 1
     # Parsing over YOLO text file output and creating rows of data
-    for file in os.listdir(filepath):
+    for file in tqdm(os.listdir(filepath), desc=f"Converting {character} .txt files into dataframe", unit="file"):
         with open(str(filepath + "/" + file), encoding = 'utf-8') as f:
             lines = f.readlines()
         # Splitting filename string to grab the frame # of video
@@ -96,7 +183,7 @@ def character_frames(filepath, keypath):
         # Video name is going to be all the text in the label filenames except the frame number at the end
         i = 1
         video = filesplit[0]
-        while i < len(filesplit):
+        while i < len(filesplit) - 1:
             video = video + "_" + filesplit[i]
             i = i + 1
         # Will always be the last value in the list regardless of the video name
@@ -108,11 +195,11 @@ def character_frames(filepath, keypath):
 
             cls = detection[0]
             # Changing out the class numbers for the actual class names
-            actiondesc = keys[int(cls)].split("-")
+            actiondesc = model_classes[int(cls)].split("-")
             # Grabbing character name
-            character = actiondesc[0]
+            character2 = actiondesc[0]
 
-            # Extra values for jumps, blocking description, etc. *Dependent on consistent class naming conventions
+            # Extra values for jumps, blocking description, etc. *Dependent on consistent class naming format
             action = actiondesc[1]; desc = ""  # Defaults
             if len(actiondesc) > 2:
                 desc = actiondesc[2]
@@ -137,41 +224,433 @@ def character_frames(filepath, keypath):
             area = w*h
             conf = float(detection[5])
 
-            # Debug printouts
-            # print(str(progress) + "/" + str(file_count))  # Can't use frame for progress counter since they're not actually in order in the folder
-            # print("VIDEO:", video)
-            # print("FRAME:", frame)
-            # print("CHARACTER:", character)
-            # print(actiondesc)
-            # print("ACTION:", action)
-            # print("DESCRIPTION:", desc)
-            # print("CONFIDENCE:", conf)
-            # print("RAW DETECTION", detection)
-            # print("--------------------------------------------------------------------")
+            if debug:
+                logger.debug("--------------------------------------------------------------------")
+                logger.debug(f"{progress}/{file_count}")  # Can't use frame for progress counter since they're not actually in order in the folder
+                logger.debug(f"VIDEO: {video}")
+                logger.debug(f"FRAME: {frame}")
+                logger.debug(f"CHARACTER: {character2}")
+                logger.debug(f"ACTIONDESC: {actiondesc}")
+                logger.debug(f"ACTION: {action}")
+                logger.debug(f"DESCRIPTION: {desc}")
+                logger.debug(f"CONFIDENCE: {conf}")
+                logger.debug(f"RAW DETECTION {detection}")
 
-            row = [str(video), int(frame), round(frame/60,2), str(character), str(action), str(desc), x, y, w, h, area, conf]
+            row = [str(video), int(frame), frame_to_ts(frame), str(character2), str(action), str(desc), x, y, w, h, area, conf]
             df.loc[len(df)] = row
         progress = progress + 1
-
     return df
 
-# ------------------------------------------ FRAME MERGING ---------------------------------------------------------------
-######## CLEANS up character frames by using roster frames and selects a single detection for each frame/character combination using roster frames to validate
-#### GOAL IS TO SELECT ONE VALIDATED DETECTION
-def validate_characters(r, c1, c2, debug=False):
 
-    # ------------------------------------------------------------------------------------------------------------
+# ------------------------------------------ CHARACTER FRAMES VALIDATION ----------------------------------------------
+
+def validate_characters(r, c_frames, iou_threshold=0.1):
+    """
+    Validates character action models against a baseline roster model using Vectorized IoU.
+    """
+
+    # Rename columns in roster df
+    r = r[['video', 'frame', 'character', 'x_center', 'y_center', 'width', 'height']].rename(
+                    columns={'x_center': 'truth_x', 'y_center': 'truth_y', 'width': 'truth_w', 'height': 'truth_h'})
+
+    # Vectorized inner merge (Instantly drops false positive detections)
+    merged = pd.merge(c_frames, r,on=['video', 'frame', 'character'],how='inner')
+
+    # Convert both detections boxes to minx/max corners
+    # Character action corners
+    c_xmin = merged['x_center'] - (merged['width'] / 2)
+    c_xmax = merged['x_center'] + (merged['width'] / 2)
+    c_ymin = merged['y_center'] - (merged['height'] / 2)
+    c_ymax = merged['y_center'] + (merged['height'] / 2)
+
+    # Roster corners
+    r_xmin = merged['truth_x'] - (merged['truth_w'] / 2)
+    r_xmax = merged['truth_x'] + (merged['truth_w'] / 2)
+    r_ymin = merged['truth_y'] - (merged['truth_h'] / 2)
+    r_ymax = merged['truth_y'] + (merged['truth_h'] / 2)
+
+    # Calculate intersecting rectangle (highest mins and lowest maxes)
+    inter_xmin = np.maximum(c_xmin, r_xmin)
+    inter_ymin = np.maximum(c_ymin, r_ymin)
+    inter_xmax = np.minimum(c_xmax, r_xmax)
+    inter_ymax = np.minimum(c_ymax, r_ymax)
+
+    # Calculate area of overlap
+    # .clip(lower=0) ensures that if the boxes DO NOT overlap, the width/height becomes 0 instead of a negative number
+    inter_width = (inter_xmax - inter_xmin).clip(lower=0)
+    inter_height = (inter_ymax - inter_ymin).clip(lower=0)
+    inter_area = inter_width * inter_height
+
+    # Calculate IoU ratio
+    action_area = merged['width'] * merged['height']
+    truth_area = merged['truth_w'] * merged['truth_h']
+    union_area = action_area + truth_area - inter_area
+    merged['iou'] = inter_area / union_area
+
+    # Drop anything that doesn't physically overlap enough
+    valid_detections = merged[merged['iou'] >= iou_threshold].copy()
+    # Sort by confidence first then IoU for tiebreakers
+    valid_detections = valid_detections.sort_values(['confidence', 'iou'], ascending=[False, False])
+    # Drop duplicates by keeping first (best conf and iou)
+    valid_detections = valid_detections.drop_duplicates(subset=['video', 'frame', 'character'], keep='first')
+    # Sort again by time/frame so the order of the df makes sense when you look at it
+    valid_detections = valid_detections.sort_values(['frame', 'time'], ascending=[True, True])
+    # Drop temporary truth and math columns
+    final_cols = [col for col in valid_detections.columns if not col.startswith('truth_') and col != 'iou']
+
+    return valid_detections[final_cols].reset_index(drop=True)
+
+
+# ------------------------------------------ ACTION MERGING ------------------------------------------------------------
+
+# Takes character frame by frame data and converts it into full "actions".
+# Ex.] A sprite appearing on screen for 10 frames consecutively turns into one "action" / row
+
+def merge_frames(df, ts_func=frame_to_ts, min_frames=4, min_conf=0.50, max_gap_frames=6):
+    """
+    Merges individual detections of each frame into one row/action. Runs on each character separately.
+    Ex.] 15 consecutive rows of "KEN-2MK" turns into 1 row with the frame is started and ended on.
+    """
+
+    # --- PASS 1 : Look at the data by action and then merge based on how many frames away the next duplicate action is
+
+    # Sanitize Strings (Prevents NaN comparison failures)
+    df = df.copy()
+    df['character'] = df['character'].fillna("UNKNOWN").astype(str)
+    df['action'] = df['action'].fillna("UNKNOWN").astype(str)
+    df['description'] = df['description'].fillna("").astype(str)
+
+    # Sort by actions first, then by frame
+    # Instead of looking at the data in chronological order, sort by action and then merge based on how many frames away the next duplicate action is
+    sort_cols = ['character', 'action', 'description', 'frame']
+    df = df.sort_values(by=sort_cols).reset_index(drop=True)
+
+    # Identify when a row changes
+    char_changed = (df['character'] != df['character'].shift())
+    action_changed = (df['action'] != df['action'].shift())
+    desc_changed = (df['description'] != df['description'].shift())
+
+    # Calculate frame gap between rows
+    frame_gap = df.groupby(['character', 'action', 'description'])['frame'].diff()
+    # Fill group starter NaNs with 0, then check if frame gap was exceeded
+    gap_exceeded = frame_gap.fillna(0) > max_gap_frames
+    # Combine markers to increment unique track block indices
+    df['block_id'] = (char_changed | action_changed | desc_changed | gap_exceeded).cumsum()
+
+    # Compress rows into single actions
+    agg_df = df.groupby('block_id').agg(
+        startup_frame=('frame', 'min'),
+        ending_frame=('frame', 'max'),
+        total_frames_detected=('frame', 'count'),  # Actual detected frame frames
+        character=('character', 'first'),
+        action=('action', 'first'),
+        description=('description', 'first'),
+        avg_confidence=('confidence', 'mean'),
+        start_x=('x_center', 'first'),
+        start_y=('y_center', 'first'),
+        end_x=('x_center', 'last'),
+        end_y=('y_center', 'last')
+    ).reset_index(drop=True)
+
+    # Filtering out actions with total_frames < min_frames and conf less than min_conf
+    filtered_df = agg_df[(agg_df["total_frames_detected"] >= min_frames) &(agg_df["avg_confidence"] >= min_conf)].copy()
+
+    # Sort back into order by frame/time
+    filtered_df = filtered_df.sort_values(by=['startup_frame']).reset_index(drop=True)
+
+    # Calculate/format, total_frames, time, starting_position, ending_position, and distance_moved columns
+    filtered_df['total_frames'] = filtered_df['ending_frame'] - filtered_df['startup_frame'] + 1
+    filtered_df['time'] = filtered_df['startup_frame'].apply(ts_func)
+    filtered_df['starting_position'] = list(zip(filtered_df['start_x'], filtered_df['start_y']))
+    filtered_df['ending_position'] = list(zip(filtered_df['end_x'], filtered_df['end_y']))
+    dx = filtered_df['end_x'] - filtered_df['start_x']
+    dy = filtered_df['end_y'] - filtered_df['start_y']
+    filtered_df['distance_moved'] = np.sqrt(dx ** 2 + dy ** 2)
+
+    ordered_columns = [
+        "startup_frame", "ending_frame", "total_frames", "time", "character",
+        "action", "description", "avg_confidence", "starting_position",
+        "ending_position", "distance_moved"
+    ]
+    pass1 = filtered_df[ordered_columns].reset_index(drop=True)
+
+    # --- PASS 2 : Now we sort the data chronologically and merge repeating actions again
+
+    # Sort by frame of video
+    df = pass1.sort_values(by=['startup_frame']).reset_index(drop=True)
+
+    # Identify when a row changes
+    char_changed = df['character'] != df['character'].shift()
+    action_changed = df['action'] != df['action'].shift()
+    desc_changed = df['description'] != df['description'].shift()
+
+    # Calculate frame gap between consecutive rows (current startup_frame - previous row's ending_frame
+    # *Can add this to the following merge but any consecutive action after the PASS 1 merge can usually safely be assumed to be the same instance of that action
+    timeline_gap = df['startup_frame'] - df['ending_frame'].shift()
+
+    # Trigger a merge split if the identity changes OR the timeline gap is exceeded
+    df['collapse_id'] = (char_changed | action_changed | desc_changed).cumsum()
+
+    # Collapse adjacent matching blocks
+    pass2 = df.groupby('collapse_id').agg(
+        startup_frame=('startup_frame', 'min'),
+        ending_frame=('ending_frame', 'max'),
+        character=('character', 'first'),
+        action=('action', 'first'),
+        description=('description', 'first'),
+        avg_confidence=('avg_confidence', 'mean'),
+        starting_position=('starting_position', 'first'),  # Keep origin of first block
+        ending_position=('ending_position', 'last')  # Keep destination of last block
+    ).reset_index(drop=True)
+
+    # Calculate/format, total_frames, time, starting_position, ending_position, and distance_moved columns
+    pass2['total_frames'] = pass2['ending_frame'] - pass2['startup_frame'] + 1
+    pass2['time'] = pass2['startup_frame'].apply(ts_func)
+    start_x = pass2['starting_position'].str[0]
+    start_y = pass2['starting_position'].str[1]
+    end_x = pass2['ending_position'].str[0]
+    end_y = pass2['ending_position'].str[1]
+    pass2['distance_moved'] = np.sqrt((end_x - start_x) ** 2 + (end_y - start_y) ** 2)
+
+    ordered_columns = [
+        "startup_frame", "ending_frame", "total_frames", "time", "character",
+        "action", "description", "avg_confidence", "starting_position",
+        "ending_position", "distance_moved"
+    ]
+
+    return pass2[ordered_columns]
+
+
+def load_context_rules(filepath="sf3_context.yaml"):
+    def construct_yaml_tuple(loader, node):
+        return tuple(loader.construct_sequence(node))
+    yaml.SafeLoader.add_constructor('tag:yaml.org,2002:seq', construct_yaml_tuple)
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            return yaml.safe_load(file)
+    except FileNotFoundError:
+        print(f"Error: The file {filepath} could not be found.")
+        return {}
+    except yaml.YAMLError as exc:
+        print(f"Error parsing YAML file: {exc}")
+        return {}
+
+
+def apply_advanced_sequence_context(df, sequence_rules):
+    """
+    Scans the timeline using a flat string representation of action+description.
+    Filters by character block from the YAML, and dynamically splits the
+    resolved action back into 'action' and 'description' columns.
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    # 1. Create a vectorized compound string array for matching
+    # If description exists, make it 'action-description', else just 'action'
+    has_desc = df['description'].notna() & (df['description'] != "")
+    match_series = df['action'].astype(str).copy()
+    match_series[has_desc] = df['action'].astype(str) + "-" + df['description'].astype(str)
+    df['_match_string'] = match_series
+
+    # 2. Iterate through the YAML character rules
+    for character, rules in sequence_rules.items():
+        if rules is None:
+            continue
+
+        # Character Gatekeeper: If this character's data isn't present, skip their rules
+        char_mask = df['character'] == character
+        if not char_mask.any():
+            continue
+
+        for pattern_list, resolved_action in rules.items():
+            pattern = list(pattern_list)
+            pattern_len = len(pattern)
+
+            while True:
+                match_found = False
+                df_len = len(df)
+
+                if df_len < pattern_len:
+                    break
+
+                # Slide down the chronological timeline
+                for i in range(df_len - pattern_len + 1):
+                    window_df = df.iloc[i: i + pattern_len]
+                    current_window_states = window_df['_match_string'].tolist()
+
+                    # Compare the timeline window directly to your flat YAML list
+                    if current_window_states == pattern:
+                        window_indices = window_df.index.tolist()
+                        first_idx = window_indices[0]
+                        last_idx = window_indices[-1]
+
+                        # Stretch the final block back to the sequence start
+                        df.loc[last_idx, 'startup_frame'] = df.loc[first_idx, 'startup_frame']
+                        df.loc[last_idx, 'starting_position'] = df.loc[first_idx, 'starting_position']
+
+                        # Parse the resolved action string back into Action and Description
+                        if "-" in resolved_action:
+                            act_part, desc_part = resolved_action.split("-", 1)
+                        else:
+                            act_part, desc_part = resolved_action, ""
+
+                        # Assign the dynamically split components
+                        df.loc[last_idx, 'action'] = act_part
+                        df.loc[last_idx, 'description'] = desc_part
+
+                        # Remove the setup/filler states
+                        drop_indices = window_indices[:-1]
+                        df = df.drop(drop_indices)
+
+                        match_found = True
+                        break  # Break to reset the tracking head loop due to mutated df size
+
+                if not match_found:
+                    break  # Clear to move to the next YAML rule
+
+    # Clean up the temporary tracking column, recalculate frames, and re-index
+    if '_match_string' in df.columns:
+        df = df.drop(columns=['_match_string'])
+
+    df['total_frames'] = df['ending_frame'] - df['startup_frame'] + 1
+    return df.reset_index(drop=True)
+
+
+
+
+
+
+#### Similar to actions but for VFX
+def merge_vfx_frames(df, debug=False):
+    """
+    Merges individual detections of each frame into one row/action. Runs on each character separately.
+    Ex.] 15 consecutive rows of "KEN-2MK" turns into 1 row with the frame is started and ended on
+    """
+    print()
+############ CONTEXT LOGIC
+# Trigger = move or condition that tells script that an action is potentially a reused animation of something else
+    # VFX > Character = if you see VFX change character action row (See dudleys car = intro, see superart = super)
+    # CHaracter to VFX = if you see  character do something look for VFX to confirm
+    # Character ~, merge actions to one based on context actions )UREIN 236P to 236LP
+# Conditions  = What conditions need to be met to confirm changes need to be made. Ex] Superflash, target combo, key animation
+# Merge identified rows and use earliest startup frame, weighted averages etc.
+### Where do we put context values? Next to everything else? I seperate sheet / file?
+###### Remove detections from everything where Roster character aren't on screen (character select)
+
+### Character, move to be adjusted, list of what to look for, look back int, look forward int
+### merge with results?
+def context(c, vfx, debug=False):
+    print()
+
+
+
+
+
+
+# ------------------------------------------ RESULTS MERGING ---------------------------------------------------------------
+
+# Adding "results" to attacks in action dataframe
+# *Can find the results of an attack by looking at the opposing character's animation during the attack
+# Ex.] If P1 is doing 5HP and P2 is currently being hit, the 5HP's result is "hit"
+def results(df):
+    # Making sure the df is sorted by frame
+    df = df.sort_values(by=["startup_frame"])
+    df = df.reset_index(drop=True)
+    df["time"] = df["startup_frame"].apply(frame_to_ts)
+
+    # List of non-normals / attacks to filter out of hit/block checks
+    states = ["standing", "walking", "crouching", "jump", "hit", "block", "dash", "jumping", 'lose', 'win',
+              "forwarddash", "backdash", "knockdown", "rise", "walk", "block", "hit", "", "parry", np.nan]
+
+    # Default result values for attacks
+    df["P1_result"] = np.where(~df.action_x.isin(states), "whiff", "")
+    df["P2_result"] = np.where(~df.action_y.isin(states), "whiff", "")
+
+    # Iterating over actions/sprites and looking for the characters to be in "hit", "block", or "parry" state, then looking at the other character to see what caused that state.
+    for index, row in df.iterrows():
+        # Converting time doulbe into an actual datetime value
+
+        ####  have to do something here to handle projectiles?
+        if df.loc[index, "action_x"] in ["hit", "block", "parry"] and index > 0:
+        # Look at P1 action, if HIT or BLOCK, look for previous P2 action that caused that state
+            i = 0
+            print(index, i)
+            print(df.loc[index - i, "action_y"])
+            while True: # Found the move that caused the hit/block
+                if df.loc[index - i, "action_y"] not in states and pd.isna(df.loc[index - i, "action_y"]) == False:
+                    df.loc[index - i, "P2_result"] = df.loc[index, "action_x"]
+                    break
+                else: # Keep searching for the move that caused the hit/block
+                    i = i + 1
+        elif df.loc[index, "action_y"] in ["hit", "block", "parry"] and index > 0:
+        # Look at P2 action, if HIT or BLOCK, look for previous P1 action that caused that state
+            i = 0
+            while True: # Found the move that caused the hit/block
+                if df.loc[index - i, "action_x"] not in states and pd.isna(df.loc[index - i, "action_x"]) == False:
+                    df.loc[index - i, "P1_result"] = df.loc[index, "action_y"]
+                    break
+                else: # Keep searching for the move that caused the hit/block
+                    i = i + 1
+
+        # Reorder and rename columns
+    df = df[['time', 'startup_frame', 'ending_frame_x',
+             'total_frames_x', "character_x", "action_x",
+             "description_x","P1_result", "avg_confidence_x",
+             'starting_position_x', 'ending_position_x', 'distance_moved_x',
+            'ending_frame_y', 'total_frames_y', "character_y",
+             "action_y", "description_y", "P2_result", "avg_confidence_y",
+             'starting_position_y', 'ending_position_y', 'distance_moved_y']]
+
+    cols = ['timestamp', 'startup_frame', 'P1_ending_frame',
+            'P1_total_frames','P1_character','P1_action',
+            'P1_description', 'P1_result', 'P1_avg_confidence',
+            'P1_starting_position', "P1_ending_position", "P1_distance_moved",
+            'P2_ending_frame', 'P2_total_frames', 'P2_character',
+            'P2_action', 'P2_description', 'P2_result', 'P2_avg_confidence',
+            'P2_starting_position', "P2_ending_position", "P2_distance_moved"]
+    df.columns = cols
+    return df
+
+
+# ------------------------------------------ ARCHIVE -------------------------------------------------------------------
+
+def validate_characters_old(r, c1, c2, debug=False):  # df output from roster_frames and character_frames 1 and 2
+    """
+    Parses over each batch of character action detections in every frame and tries to validate the best detection
+    to move forward with by referencing where the roster detection says that character is supposed to be
+    on that given frame
+    """
+    # ---------------------------------------------------------------------------------------------
     # ------------------------------------------- SETUP -------------------------------------------
-    # ------------------------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------
 
-    # Finds the latest frame reached and uses that for iterations
-    last_frame = max(set(list(r['frame']) + list(c1['frame']) + list(c1['frame'])))
+    logger = get_file_logger(f"validate_characters", f"logs/validate_characters.log", level=logging.DEBUG)
 
-    # Descriptive statistics by character for 'area' and 'confidence'. Modified to handle both model types
+    # Finds the last frame of the video and uses it for the limit of the main while loop
+    last_frame = max(set(list(r['frame']) + list(c1['frame']) + list(c2['frame'])))
+
+    # Grabbing characters from each model and attempting to handle shotos
+    char_c1 = c1['character'].iloc[0]  # Character from model 1
+    char_c2 = c2['character'].iloc[0]  # Character from model 2
+    expected_chars = [char_c1, char_c2]
+
     def d_stats(df, roster=False):
+        """
+        Descriptive statistics by character for 'area' and 'confidence'.
+        Modified to handle both model types (roster/character)
+        """
+
+        # Creating descriptive statistics for area and conf for every character detected in roster model
         stats = pd.DataFrame(r.groupby('character')[['area', 'confidence']].describe())
         stats.columns = stats.columns.droplevel(0)  # Getting rid of multi-index because it's confusing
         stats = stats.reset_index()
+        if debug and roster:
+            stats.to_csv("logs/roster_dstats.csv", index=False)
+        elif debug and not roster:
+            char = df['character'].iloc[0]
+            stats.to_csv(f"logs/{char}_dstats.csv", index=False)
 
         # Fixing column names for descriptive stats
         col = 0
@@ -182,91 +661,73 @@ def validate_characters(r, c1, c2, debug=False):
             stats.columns.values[7 + col] = i + "75%"; stats.columns.values[8 + col] = i + "max"
             col = col + 8
 
-        ############## Handle shoto detected as AKUMA etc.
-        # Sorting rows by the characters that appear the most
-        stats = stats.sort_values('area_count', ascending=False).reset_index()
-        char1_r = stats['character'][0]  # Character with most detections
-
         # Setting up area and confidence outliers for roster character 1
-        c1_area_avg = stats[stats['character'] == char1_r]['area_mean'].values[0]
-        c1_area_std = stats[stats['character'] == char1_r]['area_std'].values[0]
+        c1_area_avg = stats[stats['character'] == char_c1]['area_mean'].values[0]
+        c1_area_std = stats[stats['character'] == char_c1]['area_std'].values[0]
         c1_area_out = [c1_area_avg-(3*c1_area_std), c1_area_avg+(3*c1_area_std)]
-        c1_conf_avg = stats[stats['character'] == char1_r]['confidence_mean'].values[0]
-        c1_conf_std = stats[stats['character'] == char1_r]['confidence_std'].values[0]
+
+        c1_conf_avg = stats[stats['character'] == char_c1]['confidence_mean'].values[0]
+        c1_conf_std = stats[stats['character'] == char_c1]['confidence_std'].values[0]
         c1_conf_out = [c1_conf_avg-(3*c1_conf_std), c1_conf_avg+(3*c1_conf_std)]
 
         if roster:  # Setting up outliers for two characters
-            char2_r = stats['character'][1]  # Character with 2nd most detections
-
             # Setting up area and confidence outliers for roster character 2
-            c2_area_avg = stats[stats['character'] == char2_r]['area_mean'].values[0]
-            c2_area_std = stats[stats['character'] == char2_r]['area_std'].values[0]
+            c2_area_avg = stats[stats['character'] == char_c2]['area_mean'].values[0]
+            c2_area_std = stats[stats['character'] == char_c2]['area_std'].values[0]
             c2_area_out = [c2_area_avg - (3 * c2_area_std), c2_area_avg + (3 * c2_area_std)]
-            c2_conf_avg = stats[stats['character'] == char2_r]['confidence_mean'].values[0]
-            c2_conf_std = stats[stats['character'] == char2_r]['confidence_std'].values[0]
-            c2_conf_out = [c2_conf_avg - (3 * c2_conf_std), c2_conf_avg + (3 * c2_conf_std)]
 
-            cr_list = [char1_r, char2_r]
+            c2_conf_avg = stats[stats['character'] == char_c2]['confidence_mean'].values[0]
+            c2_conf_std = stats[stats['character'] == char_c2]['confidence_std'].values[0]
+            c2_conf_out = [c2_conf_avg - (3 * c2_conf_std), c2_conf_avg + (3 * c2_conf_std)]
+            cr_list = [char_c1, char_c2]
 
             return c1_area_out, c1_conf_out, c2_area_out, c2_conf_out, cr_list, c1_conf_std, c2_conf_std  # For roster model
         return c1_area_out, c1_conf_out, c1_conf_std  # For character models
 
     r_d_stats = d_stats(r, roster=True)
-    char_r_list = r_d_stats[4]  # Characters found in roster model
-    c1_r = char_r_list[0]  # Most detected character in roster model
-    c2_r = char_r_list[1]  # 2nd most detected character in roster model
-
+    # char_r_list = r_d_stats[4]  # Characters found in roster model #### redundant now
     c1_d_stats = d_stats(c1)
     c2_d_stats = d_stats(c2)
+    if debug:
+        logger.debug(expected_chars)
+        # logger.debug(char_r_list)
+        logger.debug(r_d_stats)
+        logger.debug(c1_d_stats)
+        logger.debug(c2_d_stats)
 
-    char_c1 = c1['character'][0]  # Character from model 1 output
-    char_c2 = c2['character'][0]  # Character from model 2 output
-    expected_chars = [char_c1, char_c2]
+    # Removing all rows with low outlier confidences. *False negatives are better than false positives
+    r = r[r['confidence'] > np.mean([r_d_stats[1][0], r_d_stats[3][0]])]
+    c1 = c1[c1['confidence'] > c1_d_stats[1][0]]
+    c2 = c2[c2['confidence'] > c2_d_stats[1][0]]
+    r.to_csv('r_conf_filter_test.csv', index=False)
+    if debug:
+        c1.to_csv('c1_conf_filter_test.csv', index=False)
+        c2.to_csv('c2_conf_filter_test.csv', index=False)
 
-    ############ Handle shotos being detected as other shotos (Yellow Ken = Sean)
-    # Comparing the characters in c1 and c2 (user selected models for the video) against the characters found in the roster model (automatically detected)
-    if char_c1 not in char_r_list or char_c2 not in char_r_list:
-        if char_c1 in char_r_list:
-            c1i = char_r_list.index(char_c1)  # Index where character 1 can be found in roster character list
-            c2i = char_r_list[c1i - 1]  # The remaining index is character 2, either 0 or -1
-        elif char_c2 in char_r_list:
-            c2i = char_r_list.index(char_c2)  # Index where character 2 can be found in roster character list
-            c1i = char_r_list[c2i - 1]  # The remaining index is character 1, either 0 or -1
-        else:  ##### Neither are in the list for some reason
-            if debug:
-                print()
-                print("ERROR: Characters found in models don't match selected character models.")
-                print()
-                exit()
-
-    # Removing all rows with outlier confidences (#### Might be better to keep)
-    # r = r[r['confidence'] > np.mean([r_d_stats[1][0], r_d_stats[3][0]])]
-    # c1 = c1[c1['confidence'] > c1_d_stats[1][0]]
-    # c2 = c2[c2['confidence'] > c2_d_stats[1][0]]
-    # r.to_csv('r_conf_filter_test.csv', index=False)
-    # c1.to_csv('c1_conf_filter_test.csv', index=False)
-    # c2.to_csv('c2_conf_filter_test.csv', index=False)
-
-    # Setting up empty dataframes to fill with winning detections
-    c1_val = pd.DataFrame(columns=["video", "frame", "time", "character", "action", "description", "x", "y", "w", "h", "area", "confidence"])
-    c2_val = pd.DataFrame(columns=["video", "frame", "time", "character", "action", "description", "x", "y", "w", "h", "area", "confidence"])
+    # Setting up empty dataframes to fill with winning detections and initializing variables
+    c1_val = pd.DataFrame(columns=["video", "frame", "time", "character", "action", "description", "x_center", "y_center", "width", "height", "area", "confidence"])
+    c2_val = pd.DataFrame(columns=["video", "frame", "time", "character", "action", "description", "x_center", "y_center", "width", "height", "area", "confidence"])
     f = 0  # Frame of video the loop is currently looking at
     t1 = 0  # Character 1 tracking trigger counter
     t2 = 0  # Character 2 tracking trigger counter
     tracking_c1 = False  # Character 1 tracking trigger
     tracking_c2 = False  # Character 2 tracking trigger
-    # Lists used during pre-tracking for getting the average area of the past 5 detections
+    # Lists used during pre-tracking for getting the average confidence of the past 5 detections
     t1_prev_5_conf = []
     t2_prev_5_conf = []
 
-    # ------------------------------------------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------------------------------
     # ------------------------------------------- MAIN LOOP -------------------------------------------
-    # ------------------------------------------------------------------------------------------------------------
-    while f < last_frame:
+    # -------------------------------------------------------------------------------------------------
+    while f < last_frame:  # Iterate over frames of the video
+
+        ####### Add progress bar
         if debug:
-            print("----------------------------",str(f) + "f || ", str(round(f/60,2)) + "s ----------------------------")
-            print("TRACKING C1 ->", tracking_c1, t1)
-            print("TRACKING C2 ->", tracking_c2, t2)
+            # print("----------------------------",str(f) + "f || ", str(round(f/60,2)) + "s ----------------------------")
+            logger.debug(f"---------------------------- {f} || {str(round(f/60,2))}s----------------------------")
+            logger.debug(f"TRACKING {char_c1} -> {tracking_c1}, {t1}")
+            logger.debug(f"TRACKING {char_c2} -> {tracking_c2}, {t2}")
 
         # Each dataframe filtered for the detections on the current frame f and sorted by highest confidence
         r_f = r[r["frame"] == f].sort_values('confidence', ascending=False).reset_index()
@@ -312,7 +773,7 @@ def validate_characters(r, c1, c2, debug=False):
         r_f['distance_avg1'] = r_f['distance_from_r1_prev'] +  r_f['distance_from_c1_prev'] / 2
         r_f['distance_avg2'] = r_f['distance_from_r2_prev'] +  r_f['distance_from_c2_prev'] / 2
 
-        if len(r_f) > 0:
+        if len(r_f) > 0:  # Just to make sure this doesn't try to run at the start of the loop when frame = 0
             if tracking_c1 and len(c1_f) > 0:
                 winner_r1 = r_f['distance_avg1'].idxmin()  # Coordinates of current frame's roster detection
                 r1_xy_current = [r_f.iloc[winner_r1]['x'], r_f.iloc[winner_r1]['y']]  # Current detection for c1 in roster
@@ -334,7 +795,7 @@ def validate_characters(r, c1, c2, debug=False):
         # ------------------------------------------------------------------------------------------------------------
         # ------------------------------------------- CHARACTER 1 TRACKING -------------------------------------------
         # ------------------------------------------------------------------------------------------------------------
-        if tracking_c1 and len(c1_f) > 0:
+        if tracking_c1 and len(c1_f) > 0:  ## AND character in roster_f set/list
             # Calculate distance for each row in c1 to previous c1,r1 and current r1 and choose the closest average
             # Filling distance columns
             i = 0
@@ -347,8 +808,8 @@ def validate_characters(r, c1, c2, debug=False):
                                                            c1_f.loc[i, 'distance_from_r1_current']])
                 i = i + 1
             # Distance is less than 0.2 and confidence isn't an outlier
-            if len(c1_f[(c1_f['distance_average'] < 0.2) & (c1_f['confidence'] > c1_d_stats[1][0])]) > 0:
-                c1_f_d = c1_f[(c1_f['distance_average'] < 0.2) & (c1_f['confidence'] > c1_d_stats[1][0])]
+            if len(c1_f[(c1_f['distance_average'] < 0.1) & (c1_f['confidence'] > c1_d_stats[1][0])]) > 0:
+                c1_f_d = c1_f[(c1_f['distance_average'] < 0.1) & (c1_f['confidence'] > c1_d_stats[1][0])]
                 c1_f_d = c1_f_d.sort_values(['distance_average', 'confidence'], ascending=[True,False])
                 if debug:
                     print(expected_chars[0], c1_f_d.iloc[0]['action'])
@@ -361,7 +822,7 @@ def validate_characters(r, c1, c2, debug=False):
             else:  ######## Good enough for now but may have to implement more logic to handle when it gets lost
                 if debug:
                     print("----- NO C1 WINNER")
-                    print(c1_f_d.to_string())
+                    #print(c1_f_d.to_string())
                     print(list(r_f['character']))
                 t1 = t1 - 1
                 if t1 < 0:
@@ -396,7 +857,7 @@ def validate_characters(r, c1, c2, debug=False):
                     0]  # Index of top detect?
                 c1_xy_prev = [t1_r_f['x'][exp_c1_i], t1_r_f['y'][exp_c1_i]]  # Starting coordinates to begin tracking c1
                 r1_xy_prev = [t1_r_f['x'][exp_c1_i], t1_r_f['y'][exp_c1_i]]  # Starting coordinates to begin tracking r1
-                if tracking_c2:  # Store character 1 values to return to in case tracking for c1 is successful and we -5f
+                if tracking_c2:  # Store character 1 values to return to in case tracking for c1 is successful and we need to go back -5f
                     c2_xy_store = c2_xy_prev
                     r2_xy_store = r2_xy_prev
             t1 = t1 + 1  # Add to tracking trigger count
@@ -423,8 +884,8 @@ def validate_characters(r, c1, c2, debug=False):
                                                            c2_f.loc[i, 'distance_from_r2_current']])
                 i = i + 1
             # Distance is less than 0.2 and confidence isn't an outlier
-            if len(c2_f[(c2_f['distance_average'] < 0.2) & (c2_f['confidence'] > c2_d_stats[1][0])]) > 0:
-                c2_f_d = c2_f[(c2_f['distance_average'] < 0.2) & (c2_f['confidence'] > c2_d_stats[1][0])]
+            if len(c2_f[(c2_f['distance_average'] < 0.1) & (c2_f['confidence'] > c2_d_stats[1][0])]) > 0:
+                c2_f_d = c2_f[(c2_f['distance_average'] < 0.1) & (c2_f['confidence'] > c2_d_stats[1][0])]
                 c2_f_d = c2_f_d.sort_values(['distance_average', 'confidence'], ascending=[True, False])
                 if debug:
                     print(expected_chars[1], c2_f_d.iloc[0]['action'])
@@ -437,7 +898,7 @@ def validate_characters(r, c1, c2, debug=False):
             else:  ######## Good enough for now but may have to implement more logic to handle when it gets lost
                 if debug:
                     print("----- NO c2 WINNER")
-                    print(c2_f_d.to_string())
+                    #print(c2_f_d.to_string())
                     print(list(r_f['character']))
                 t2 = t2 - 1
                 if t2 < 0:
@@ -486,12 +947,13 @@ def validate_characters(r, c1, c2, debug=False):
         f = f + 1
     return c1_val.drop_duplicates(), c2_val.drop_duplicates()  # Drop duplicates to handle re-added rows from -5fs
 
-# ------------------------------------------ ACTION MERGING ---------------------------------------------------------------
-# Takes character frame by frame data and converts it into full "actions".
-# Ex.] A sprite appearing on screen for 10 frames consecutively turns into one "action"
 
-######### loop over first action DF again and merge any repeated actions
-def actions(df):
+def merge_frames_old(df, debug=False):
+    """
+    Merges individual detections of each frame into one row/action. Runs on each character separately.
+    Ex.] 15 consecutive rows of "KEN-2MK" turns into 1 row with the frame is started and ended on
+    """
+
     new_df = pd.DataFrame(columns=["startup_frame", "ending_frame", "total_frames", "time", "character", "action",
                                       "description", "avg_confidence", 'starting_position', 'ending_position',
                                       'distance_moved'])
@@ -501,36 +963,38 @@ def actions(df):
     firstframe = df["frame"].iloc[0]
     lastframe = 0; duration = 1
     conf = df["confidence"].iloc[0]
-    xy1 = [df["x"].iloc[0], df["y"].iloc[0]]
+    xy1 = [df["x_center"].iloc[0], df["y_center"].iloc[0]]
     i = 1
     # Iterating over each row/frame and merging consecutive appearances of the same sprite into one row/aciton
     while i < len(df):
         # If previous action is different from current, stop tracking current move
         if [prev_act, prev_desc] != [df["action"].iloc[i], df["description"].iloc[i]]:
-            # print(i, prev_act, prev_desc, firstframe, lastframe, duration, conf)
-            xy2 = [df["x"].iloc[i], df["y"].iloc[i]]
+            if debug:
+                print(i, prev_act, prev_desc, firstframe, lastframe, duration, conf)
+                print("-----------------------------------------------------------------------------------------")
+            xy2 = [df["x_center"].iloc[i], df["y_center"].iloc[i]]
             dxy = float(math.dist(xy1, xy2))
             if duration <= 1:  # Only appears for one frame
                 lastframe = firstframe
             else:  # Appears for multiple frames
-                conf = conf / duration
-            new_row = [firstframe, lastframe, duration, round(firstframe/60,2), df["character"].iloc[i], prev_act,
+                conf = conf / duration  # Average confidence across action
+            new_row = [firstframe, lastframe, duration, frame_to_ts(firstframe), df["character"].iloc[i], prev_act,
                        prev_desc, conf, xy1, xy2, dxy]
             new_df.loc[len(new_df)] = new_row
 
-            # Reset for next move
+            # Reset variables for next move
             prev_act = df["action"].iloc[i]
             prev_desc = df["description"].iloc[i]
             firstframe = df["frame"].iloc[i]
-            xy1 = [df["x"].iloc[i], df["y"].iloc[i]]
+            xy1 = [df["x_center"].iloc[i], df["y_center"].iloc[i]]
             lastframe = 0
             conf = df["confidence"].iloc[i]
             duration = 1
         else:  # If previous action is the same, keep going
-            # print(i, prev_act, prev_desc, firstframe, lastframe, duration, conf)
-            # print('============================== continue')
             lastframe = df["frame"].iloc[i]
             conf = conf + float(df["confidence"].iloc[i])
+            if debug:
+                print(i, prev_act, prev_desc, firstframe, lastframe, duration, conf)
             duration = duration + 1
         i = i + 1
 
@@ -559,7 +1023,7 @@ def actions(df):
                     lastframe = new_df1["ending_frame"].iloc[j]
                 else:  # Appears for multiple frames
                     conf = conf / duration
-                new_row = [firstframe, lastframe, lastframe-firstframe, round(int(firstframe)/60,2), new_df1["character"].iloc[j], prev_act,
+                new_row = [firstframe, lastframe, lastframe-firstframe,  frame_to_ts(firstframe), new_df1["character"].iloc[j], prev_act,
                            prev_desc, conf, xy1, xy2, dxy]
                 new_df2.loc[len(new_df2)] = new_row
 
@@ -580,68 +1044,5 @@ def actions(df):
         if c == 0:
             clean = True
         new_df1 = new_df2.copy()
-    return new_df2.drop_duplicates(subset=['startup_frame', 'time', 'action', 'description'], keep='last')
 
-# ------------------------------------------ RESULTS MERGING ---------------------------------------------------------------
-# Adding "results" to attacks in action dataframe
-# *Can find the results of an attack by looking at the opposing character's animation during the attack
-# Ex.] If P1 is doing 5HP and P2 is currently being hit, the 5HP's result is "hit"
-def results(df):
-    # Making sure the df is sorted by frame
-    df = df.sort_values(by=["startup_frame"])
-    df = df.reset_index(drop=True)
-    # Turning frame -> seconds
-    df["time"] = df["startup_frame"] / 60
-
-    # List of non-normals / attacks to filter out of hit/block checks
-    states = ["standing", "walking", "crouching", "jump", "hit", "block",
-              "forwarddash", "backdash", "knockdown", "rise", "walk", "block", "hit", "", "parry", np.nan]
-
-    # Default result values for attacks
-    df["P1_result"] = np.where(~df.action_x.isin(states), "whiff", "")
-    df["P2_result"] = np.where(~df.action_y.isin(states), "whiff", "")
-
-    # Iterating over actions/sprites and looking for the characters to be in "hit", "block", or "parry" state, then looking at the other character to see what caused that state.
-    for index, row in df.iterrows():
-        # Converting time doulbe into an actual datetime value
-        df.loc[index, "time"] = datetime.timedelta(seconds= int(df.loc[index, "time"]))
-        # df.loc[index, "time"] = pd.to_datetime(int(df.loc[index, "time"]), unit='s')
-
-        ####  have to do something here to handle projectiles?
-        if df.loc[index, "action_x"] == "hit" or df.loc[index, "action_x"] == "block" or df.loc[index, "action_x"] == "parry":
-        # Look at P1 action, if HIT or BLOCK, look for previous P2 action that caused that state
-            i = 0
-            while True: # Found the move that caused the hit/block
-                if df.loc[index - i, "action_y"] not in states and pd.isna(df.loc[index - i, "action_y"]) == False:
-                    df.loc[index - i, "P2_result"] = df.loc[index, "action_x"]
-                    break
-                else: # Keep searching for the move that caused the hit/block
-                    i = i + 1
-        elif df.loc[index, "action_y"] == "hit" or df.loc[index, "action_y"] == "block" or df.loc[index, "action_y"] == "parry":
-        # Look at P2 action, if HIT or BLOCK, look for previous P1 action that caused that state
-            i = 0
-            while True: # Found the move that caused the hit/block
-                if df.loc[index - i, "action_x"] not in states and pd.isna(df.loc[index - i, "action_x"]) == False:
-                    df.loc[index - i, "P1_result"] = df.loc[index, "action_y"]
-                    break
-                else: # Keep searching for the move that caused the hit/block
-                    i = i + 1
-
-        # Reorder and rename columns
-    df = df[['time', 'startup_frame', 'ending_frame_x',
-             'total_frames_x', "character_x", "action_x",
-             "description_x","P1_result", "avg_confidence_x",
-             'starting_position_x', 'ending_position_x', 'distance_moved_x',
-            'ending_frame_y', 'total_frames_y', "character_y",
-             "action_y", "description_y", "P2_result", "avg_confidence_y",
-             'starting_position_y', 'ending_position_y', 'distance_moved_y']]
-
-    cols = ['timestamp', 'startup_frame', 'P1_ending_frame',
-            'P1_total_frames','P1_character','P1_action',
-            'P1_description', 'P1_result', 'P1_avg_confidence',
-            'P1_starting_position', "P1_ending_position", "P1_distance_moved",
-            'P2_ending_frame', 'P2_total_frames', 'P2_character',
-            'P2_action', 'P2_description', 'P2_result', 'P2_avg_confidence',
-            'P2_starting_position', "P2_ending_position", "P2_distance_moved"]
-    df.columns = cols
-    return df
+    return new_df2.drop_duplicates(subset=['startup_frame', 'time', 'action', 'description'], keep='last').sort_values(by=['startup_frame','time'], ascending=True)
